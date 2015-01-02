@@ -1,12 +1,12 @@
 # tern-snabbt
 
-[tern-tabris](https://github.com/daniel-lundin/tern-snabbt) is a plugin which adds support for [snabbt.js](https://github.com/daniel-lundin/snabbt.js) to the JavaSript code intelligence system [Tern](http://ternjs.net/).
+[tern-snabbt](https://github.com/daniel-lundin/tern-snabbt) is a plugin which adds support for [snabbt.js](https://github.com/daniel-lundin/snabbt.js) to the JavaSript code intelligence system [Tern](http://ternjs.net/).
 
 ## Demo
 
 You can see demo in this git project with CodeMirror in [demos/snabbt.html](https://github.com/daniel-lundin/tern-snabbt/blob/master/demos/snabbt.html) :
 
-Here a screenshot with completion with CodeMorror snabbt completion :
+Here a screenshot with completion with CodeMirror snabbt completion :
  
 ![CodeMirror & Snabbt](https://github.com/daniel-lundin/tern-snabbt/wiki/images/TernSnabbtsWithCodeMirror.png)
  
