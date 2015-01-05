@@ -41,6 +41,9 @@ Here is a minimal example `.tern-project` configuration file:
   }
 }
 ```
+### Eclipse IDE
+
+If you are Eclipse user, you can use this tern plugin with [tern.java](https://github.com/angelozerr/tern.java) please read [here](https://github.com/angelozerr/tern.java/wiki/Tern-&-Snabbt-support) for more informations.
 
 ### With WebBrowser (CodeMirror)
 
