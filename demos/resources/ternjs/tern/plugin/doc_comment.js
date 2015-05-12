@@ -5,18 +5,24 @@
 (function(mod) {
   if (typeof exports == "object" && typeof module == "object") // CommonJS
     return mod(require("../lib/infer"), require("../lib/tern"), require("../lib/comment"),
-               require("acorn/acorn"), require("acorn/util/walk"));
+               require("acorn"), require("acorn/dist/walk"));
   if (typeof define == "function" && define.amd) // AMD
-    return define(["../lib/infer", "../lib/tern", "../lib/comment", "acorn/acorn", "acorn/util/walk"], mod);
+    return define(["../lib/infer", "../lib/tern", "../lib/comment", "acorn/dist/acorn", "acorn/dist/walk"], mod);
   mod(tern, tern, tern.comment, acorn, acorn.walk);
 })(function(infer, tern, comment, acorn, walk) {
   "use strict";
 
-  tern.registerPlugin("doc_comment", function(server) {
+  var WG_MADEUP = 1, WG_STRONG = 101;
+
+  tern.registerPlugin("doc_comment", function(server, options) {
     server.jsdocTypedefs = Object.create(null);
     server.on("reset", function() {
       server.jsdocTypedefs = Object.create(null);
     });
+    server._docComment = {
+      weight: options && options.strong ? WG_STRONG : undefined,
+      fullDocs: options && options.fullDocs
+    };
 
     return {
       passes: {
@@ -38,9 +44,20 @@
       },
       ObjectExpression: function(node) {
         for (var i = 0; i < node.properties.length; ++i)
-          attachComments(node.properties[i].key);
+          attachComments(node.properties[i]);
+      },
+      CallExpression: function(node) {
+        if (isDefinePropertyCall(node)) attachComments(node);
       }
     });
+  }
+
+  function isDefinePropertyCall(node) {
+    return node.callee.type == "MemberExpression" &&
+      node.callee.object.name == "Object" &&
+      node.callee.property.name == "defineProperty" &&
+      node.arguments.length >= 3 &&
+      typeof node.arguments[1].value == "string";
   }
 
   function postInfer(ast, scope) {
@@ -65,10 +82,19 @@
       },
       ObjectExpression: function(node, scope) {
         for (var i = 0; i < node.properties.length; ++i) {
-          var prop = node.properties[i], key = prop.key;
-          if (key.commentsBefore)
-            interpretComments(prop, key.commentsBefore, scope,
-                              node.objType.getProp(key.name));
+          var prop = node.properties[i];
+          if (prop.commentsBefore)
+            interpretComments(prop, prop.commentsBefore, scope,
+                              node.objType.getProp(prop.key.name));
+        }
+      },
+      CallExpression: function(node, scope) {
+        if (node.commentsBefore && isDefinePropertyCall(node)) {
+          var type = infer.expressionType({node: node.arguments[0], state: scope}).getObjType();
+          if (type && type instanceof infer.Obj) {
+            var prop = type.props[node.arguments[1].value];
+            if (prop) interpretComments(node, node.commentsBefore, scope, prop);
+          }
         }
       }
     }, infer.searchVisitor, scope);
@@ -86,18 +112,26 @@
 
   function interpretComments(node, comments, scope, aval, type) {
     jsdocInterpretComments(node, scope, aval, comments);
+    var cx = infer.cx();
 
     if (!type && aval instanceof infer.AVal && aval.types.length) {
       type = aval.types[aval.types.length - 1];
-      if (!(type instanceof infer.Obj) || type.origin != infer.cx().curOrigin || type.doc)
+      if (!(type instanceof infer.Obj) || type.origin != cx.curOrigin || type.doc)
         type = null;
     }
 
-    var first = comments[0], dot = first.search(/\.\s/);
-    if (dot > 5) first = first.slice(0, dot + 1);
-    first = first.trim().replace(/\s*\n\s*\*\s*|\s{1,}/g, " ");
-    if (aval instanceof infer.AVal) aval.doc = first;
-    if (type) type.doc = first;
+    var result = comments[comments.length - 1];
+    if (cx.parent._docComment.fullDocs) {
+      result = result.trim().replace(/\n[ \t]*\* ?/g, "\n");
+    } else {
+      var dot = result.search(/\.\s/);
+      if (dot > 5) result = result.slice(0, dot + 1);
+      result = result.trim().replace(/\s*\n\s*\*\s*|\s{1,}/g, " ");
+    }
+    result = result.replace(/^\s*\*+\s*/, "");
+
+    if (aval instanceof infer.AVal) aval.doc = result;
+    if (type) type.doc = result;
   }
 
   // Parses a subset of JSDoc-style comments in order to include the
@@ -141,6 +175,31 @@
   }
 
   function parseType(scope, str, pos) {
+    var type, union = false, madeUp = false;
+    for (;;) {
+      var inner = parseTypeInner(scope, str, pos);
+      if (!inner) return null;
+      madeUp = madeUp || inner.madeUp;
+      if (union) inner.type.propagate(union);
+      else type = inner.type;
+      pos = skipSpace(str, inner.end);
+      if (str.charAt(pos) != "|") break;
+      pos++;
+      if (!union) {
+        union = new infer.AVal;
+        type.propagate(union);
+        type = union;
+      }
+    }
+    var isOptional = false;
+    if (str.charAt(pos) == "=") {
+      ++pos;
+      isOptional = true;
+    }
+    return {type: type, end: pos, isOptional: isOptional, madeUp: madeUp};
+  }
+
+  function parseTypeInner(scope, str, pos) {
     pos = skipSpace(str, pos);
     var type, madeUp = false;
 
@@ -176,6 +235,13 @@
       }
       pos = fields.end;
       madeUp = fields.madeUp;
+    } else if (str.charAt(pos) == "(") {
+      var inner = parseType(scope, str, pos + 1);
+      if (!inner) return null;
+      pos = skipSpace(str, inner.end);
+      if (str.charAt(pos) != ")") return null;
+      ++pos;
+      type = inner.type;
     } else {
       var start = pos;
       if (!acorn.isIdentifierStart(str.charCodeAt(pos))) return null;
@@ -185,6 +251,7 @@
       if (/^(number|integer)$/i.test(word)) type = infer.cx().num;
       else if (/^bool(ean)?$/i.test(word)) type = infer.cx().bool;
       else if (/^string$/i.test(word)) type = infer.cx().str;
+      else if (/^(null|undefined)$/i.test(word)) type = infer.ANull;
       else if (/^array$/i.test(word)) {
         var inner = null;
         if (str.charAt(pos) == "." && str.charAt(pos + 1) == "<") {
@@ -218,8 +285,8 @@
         var cx = infer.cx(), defs = cx.parent && cx.parent.jsdocTypedefs, found;
         if (defs && (path in defs)) {
           type = defs[path];
-        } else if (found = infer.def.parsePath(path, scope).getType()) {
-          type = maybeInstance(found, path); 
+        } else if (found = infer.def.parsePath(path, scope).getObjType()) {
+          type = maybeInstance(found, path);
         } else {
           if (!cx.jsdocPlaceholders) cx.jsdocPlaceholders = Object.create(null);
           if (!(path in cx.jsdocPlaceholders))
@@ -231,17 +298,12 @@
       }
     }
 
-    var isOptional = false;
-    if (str.charAt(pos) == "=") {
-      ++pos;
-      isOptional = true;
-    }
-    return {type: type, end: pos, isOptional: isOptional, madeUp: madeUp};
+    return {type: type, end: pos, madeUp: madeUp};
   }
 
   function maybeInstance(type, path) {
     if (type instanceof infer.Fn && /^[A-Z]/.test(path)) {
-      var proto = type.getProp("prototype").getType();
+      var proto = type.getProp("prototype").getObjType();
       if (proto instanceof infer.Obj) return infer.getInstance(proto);
     }
     return type;
@@ -280,9 +342,9 @@
         case "type":
           type = parsed; break;
         case "param": case "arg": case "argument":
-          var name = m[2].slice(parsed.end).match(/^\s*(\S+)/);
-          if (!name) continue;
-          var argname = name[1] + (parsed.isOptional ? "?" : "");
+            var name = m[2].slice(parsed.end).match(/^\s*(\[?)\s*([^\]\s=]+)\s*(?:=[^\]]+\s*)?(\]?).*/);
+            if (!name) continue;
+            var argname = name[2] + (parsed.isOptional || (name[1] === '[' && name[3] === ']') ? "?" : "");
           (args || (args = Object.create(null)))[argname] = parsed;
           break;
         }
@@ -304,9 +366,9 @@
     }
   }
 
-  var WEIGHT_MADEUP = 1;
   function propagateWithWeight(type, target) {
-    type.type.propagate(target, type.madeUp ? WEIGHT_MADEUP : undefined);
+    var weight = infer.cx().parent._docComment.weight;
+    type.type.propagate(target, weight || (type.madeUp ? WG_MADEUP : undefined));
   }
 
   function applyType(type, self, args, ret, node, aval) {
@@ -319,6 +381,7 @@
     } else if (node.type == "AssignmentExpression") {
       if (node.right.type == "FunctionExpression")
         fn = node.right.body.scope.fnType;
+    } else if (node.type == "CallExpression") {
     } else { // An object property
       if (node.value.type == "FunctionExpression") fn = node.value.body.scope.fnType;
     }
